@@ -1,0 +1,59 @@
+# ===== Local critical audit =====
+$S = $env:COMPUTERNAME
+$O = "C:\Temp\${S}_Audit"; New-Item -ItemType Directory -Force -Path $O | Out-Null
+
+$features = try { Get-WindowsFeature -EA Stop } catch { @() }
+$dnsSvc   = Get-Service -Name DNS        -EA SilentlyContinue
+$dhcpSvc  = Get-Service -Name DHCPServer -EA SilentlyContinue
+$spooler  = Get-Service -Name Spooler    -EA SilentlyContinue
+
+$dnsZones = @(); if (Get-Command Get-DnsServerZone -EA SilentlyContinue) {
+  $dnsZones = Get-DnsServerZone | Select ZoneName,ZoneType
+}
+$dnsZonesText = if ($dnsZones) { ($dnsZones | Format-Table -Auto | Out-String) } else { "None" }
+
+$dhcpScopes  = & netsh dhcp server show scope 2>$null
+$dhcpScopesText = if ($dhcpScopes) { $dhcpScopes -join "`r`n" } else { "None" }
+
+$shares   = Get-SmbShare   -EA SilentlyContinue
+$sessions = Get-SmbSession -EA SilentlyContinue
+$printers = try { Get-Printer -EA Stop } catch { @() }
+
+$addsInstalled = ($features | ? { $_.Name -eq 'AD-Domain-Services' -and $_.InstallState -eq 'Installed' }).Count -gt 0
+$dcText = "Not a DC or AD tools unavailable."
+if ($addsInstalled) {
+  try {
+    Import-Module ActiveDirectory -EA Stop
+    $dcInfo = Get-ADDomainController -Discover -Service PrimaryDC,GC,KDC -EA SilentlyContinue
+    if ($dcInfo) { $dcText = ($dcInfo | Select HostName,Site,IsGlobalCatalog,Enabled | Format-Table -Auto | Out-String) }
+  } catch { }
+}
+
+$dnsStatus  = if ($dnsSvc)  { $dnsSvc.Status }  else { "NotInstalled" }
+$dhcpStatus = if ($dhcpSvc) { $dhcpSvc.Status } else { "NotInstalled" }
+$prtStatus  = if ($spooler) { $spooler.Status } else { "NotInstalled" }
+$shareCount   = ($shares   | Measure-Object).Count
+$sessionCount = ($sessions | Measure-Object).Count
+$printerCount = ($printers | Measure-Object).Count
+
+$html = @"
+<html>
+<head><meta charset='utf-8'><title>$S Critical Audit</title></head>
+<body style="font-family:Segoe UI,Arial,sans-serif">
+<h2>$S – Critical Role Audit (Local)</h2>
+<pre>DNS: $dnsStatus    DHCP: $dhcpStatus    Print Spooler: $prtStatus
+AD DS Installed: $addsInstalled
+Shares: $shareCount    Active SMB Sessions: $sessionCount    Printers: $printerCount</pre>
+<h3>DNS Zones</h3><pre>$dnsZonesText</pre>
+<h3>DHCP Scopes</h3><pre>$dhcpScopesText</pre>
+<h3>Domain Controller Info</h3><pre>$dcText</pre>
+</body></html>
+"@
+$html | Out-File "$O\summary.html" -Encoding UTF8
+
+$shares   | Select Name,Path,Description | Export-Csv "$O\shares.csv" -NoTypeInformation -Encoding UTF8
+$printers | Select Name,ShareName,PortName,DriverName | Export-Csv "$O\printers.csv" -NoTypeInformation -Encoding UTF8
+$dnsZones | Export-Csv "$O\dns_zones.csv" -NoTypeInformation -Encoding UTF8
+
+Write-Host "Done. Open: $O\summary.html" -ForegroundColor Green
+# ===== end =====
